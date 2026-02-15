@@ -6,50 +6,71 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Ключи из Railway Variables
-const client = new TwitterApi({
-  appKey: process.env.TWITTER_API_KEY,
-  appSecret: process.env.TWITTER_API_SECRET,
-  accessToken: process.env.TWITTER_ACCESS_TOKEN,
-  accessSecret: process.env.TWITTER_ACCESS_SECRET
-});
+// ✅ Для Twitter API v2 используем BEARER TOKEN
+const client = new TwitterApi(process.env.TWITTER_BEARER_TOKEN);
 
-// ✅ ИСПРАВЛЕНО: используем path parameter /:username
+// Только для чтения (read-only client)
+const roClient = client.readOnly;
+
 app.get('/api/tweets/:username', async (req, res) => {
   try {
     const username = req.params.username;
     
-    // ✅ ШАГ 1: Получаем USER ID по username
-    const user = await client.v2.userByUsername(username);
+    console.log(`Fetching tweets for: ${username}`);
+    
+    // Получаем USER ID
+    const user = await roClient.v2.userByUsername(username, {
+      'user.fields': ['profile_image_url', 'description']
+    });
     
     if (!user.data) {
-      return res.status(404).json({ error: 'User not found' });
+      return res.status(404).json({ 
+        error: 'User not found',
+        username: username 
+      });
     }
     
-    // ✅ ШАГ 2: Получаем твиты по USER ID
-    const tweets = await client.v2.userTimeline(user.data.id, {
-      'tweet.fields': 'created_at,public_metrics',
-      'max_results': 10  // опционально: количество твитов
+    console.log(`Found user: ${user.data.id}`);
+    
+    // Получаем твиты
+    const timeline = await roClient.v2.userTimeline(user.data.id, {
+      max_results: 10,
+      'tweet.fields': ['created_at', 'public_metrics', 'author_id'],
+      exclude: ['retweets', 'replies'] // Только оригинальные твиты
     });
     
     res.json({
       user: user.data,
-      tweets: tweets.data.data || []
+      tweets: timeline.data.data || [],
+      meta: timeline.data.meta
     });
     
   } catch (error) {
-    console.error('Twitter API Error:', error);
-    res.status(500).json({ 
+    console.error('❌ Twitter API Error:', error);
+    
+    // Детальная информация об ошибке
+    res.status(error.code || 500).json({ 
       error: error.message,
-      code: error.code || 'UNKNOWN'
+      type: error.type || 'Unknown',
+      code: error.code || 500,
+      data: error.data || null
     });
   }
 });
 
-// ✅ Тестовый эндпоинт (чтобы проверить что сервер работает)
+// Health check endpoint
 app.get('/', (req, res) => {
-  res.json({ status: 'Server is running!' });
+  res.json({ 
+    status: 'OK',
+    env: {
+      hasBearerToken: !!process.env.TWITTER_BEARER_TOKEN,
+      hasApiKey: !!process.env.TWITTER_API_KEY
+    }
+  });
 });
 
 const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server on port ${port}`));
+app.listen(port, () => {
+  console.log(`🚀 Server running on port ${port}`);
+  console.log(`Bearer Token: ${process.env.TWITTER_BEARER_TOKEN ? '✅ Set' : '❌ Missing'}`);
+});
