@@ -1,217 +1,142 @@
-// server.js - TWITTER API V2
 const express = require('express');
+const { spawn } = require('child_process');
 const cors = require('cors');
-const { TwitterApi } = require('twitter-api-v2');
+const fs = require('fs').promises;
+const os = require('os'); // ← Добавь это
+const path = require('path'); // ← Добавь это
 
 const app = express();
+const PORT = 3000;
+
 app.use(cors());
 app.use(express.json());
 
-// Twitter API credentials (добавь в Railway Environment Variables)
-const client = new TwitterApi({
-  appKey: process.env.TWITTER_API_KEY || 'YOUR_API_KEY',
-  appSecret: process.env.TWITTER_API_SECRET || 'YOUR_API_SECRET',
-  accessToken: process.env.TWITTER_ACCESS_TOKEN || 'YOUR_ACCESS_TOKEN',
-  accessSecret: process.env.TWITTER_ACCESS_SECRET || 'YOUR_ACCESS_SECRET',
-});
+// ✅ Правильный путь для Windows/Linux/Mac
+const TEMP_DIR = os.tmpdir();
+const SCRIPT_PATH = path.join(TEMP_DIR, 'twitter_scraper.py');
 
-// Read-only client
-const readOnlyClient = client.readOnly;
+// Python команда (автоопределение)
+const PYTHON_CMD = process.platform === 'win32' ? 'python' : 'python3';
 
-// Endpoint для получения твитов пользователя
+// Python скрипт с Twikit
+const pythonScript = `
+import sys
+import json
+from twikit import Client
+
+USERNAME = 'biancaxharden@gmail.com'
+EMAIL = 'biancaxharden@gmail.com'
+PASSWORD = 'qM28xQZc3PfDaHP'
+
+async def main():
+    client = Client('en-US')
+    
+    try:
+        await client.login(auth_info_1=USERNAME, auth_info_2=EMAIL, password=PASSWORD)
+        user = await client.get_user_by_screen_name(sys.argv[1])
+        tweets = await client.get_user_tweets(user.id, 'Tweets', count=int(sys.argv[2]) if len(sys.argv) > 2 else 20)
+        
+        result = []
+        for tweet in tweets:
+            result.append({
+                'id': tweet.id,
+                'text': tweet.text,
+                'created_at': tweet.created_at,
+                'favorite_count': tweet.favorite_count,
+                'retweet_count': tweet.retweet_count,
+                'view_count': tweet.view_count if hasattr(tweet, 'view_count') else None,
+                'reply_count': tweet.reply_count if hasattr(tweet, 'reply_count') else 0,
+            })
+        
+        print(json.dumps(result, default=str))
+    except Exception as e:
+        print(json.dumps({'error': str(e)}), file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == '__main__':
+    import asyncio
+    asyncio.run(main())
+`;
+
+// Инициализация скрипта
+async function initScript() {
+  try {
+    console.log('📝 Creating Python script at:', SCRIPT_PATH);
+    await fs.writeFile(SCRIPT_PATH, pythonScript);
+    console.log('✅ Python script created');
+  } catch (error) {
+    console.error('❌ Failed to create script:', error);
+  }
+}
+
+// Проверка аутентификации
+async function checkAuth() {
+  return new Promise((resolve) => {
+    const proc = spawn(PYTHON_CMD, [SCRIPT_PATH, 'twitter', '1']);
+    
+    proc.on('close', (code) => {
+      resolve(code === 0);
+    });
+    
+    proc.on('error', () => resolve(false));
+  });
+}
+
+// API endpoint
 app.get('/api/tweets/:username', async (req, res) => {
-  try {
-    const username = req.params.username;
-    const limit = parseInt(req.query.limit) || 10;
-    
-    console.log(`📡 Fetching tweets for: ${username}`);
-    
-    // Получаем пользователя по username
-    const user = await readOnlyClient.v2.userByUsername(username, {
-      'user.fields': ['description', 'public_metrics', 'profile_image_url']
-    });
-    
-    if (!user.data) {
-      return res.status(404).json({ 
-        error: 'User not found',
-        username: username
-      });
+  const { username } = req.params;
+  const limit = req.query.limit || '20';
+  
+  console.log(`📡 Fetching tweets for: ${username}`);
+  
+  const proc = spawn(PYTHON_CMD, [SCRIPT_PATH, username, limit]);
+  let output = '';
+  let errorOutput = '';
+  
+  proc.stdout.on('data', (data) => {
+    output += data.toString();
+  });
+  
+  proc.stderr.on('data', (data) => {
+    errorOutput += data.toString();
+  });
+  
+  proc.on('close', (code) => {
+    if (code !== 0) {
+      console.error('❌ Error:', errorOutput);
+      return res.status(500).json({ error: 'Failed to fetch tweets', details: errorOutput });
     }
     
-    const userId = user.data.id;
-    
-    // Получаем твиты пользователя
-    const tweets = await readOnlyClient.v2.userTimeline(userId, {
-      max_results: Math.min(limit, 100),
-      'tweet.fields': ['created_at', 'public_metrics', 'entities'],
-      'media.fields': ['url', 'preview_image_url'],
-      expansions: ['attachments.media_keys']
-    });
-    
-    // Форматируем результат
-    const formattedTweets = tweets.data.data.map(tweet => ({
-      id: tweet.id,
-      text: tweet.text,
-      created_at: tweet.created_at,
-      likes: tweet.public_metrics.like_count,
-      retweets: tweet.public_metrics.retweet_count,
-      replies: tweet.public_metrics.reply_count,
-      views: tweet.public_metrics.impression_count,
-      url: `https://twitter.com/${username}/status/${tweet.id}`,
-      entities: tweet.entities || {}
-    }));
-    
-    res.json({
-      success: true,
-      user: {
-        id: user.data.id,
-        username: user.data.username,
-        name: user.data.name,
-        bio: user.data.description,
-        followers: user.data.public_metrics.followers_count,
-        following: user.data.public_metrics.following_count,
-        tweets_count: user.data.public_metrics.tweet_count,
-        profile_image: user.data.profile_image_url
-      },
-      tweets: formattedTweets,
-      count: formattedTweets.length
-    });
-    
-  } catch (error) {
-    console.error('❌ Error:', error);
-    
-    // Обработка ошибок Twitter API
-    if (error.code === 429) {
-      return res.status(429).json({ 
-        error: 'Rate limit exceeded',
-        message: 'Too many requests. Try again later.'
-      });
+    try {
+      const tweets = JSON.parse(output);
+      console.log(`✅ Fetched ${tweets.length} tweets`);
+      res.json(tweets);
+    } catch (error) {
+      console.error('❌ Parse error:', error);
+      res.status(500).json({ error: 'Failed to parse response' });
     }
-    
-    if (error.code === 401) {
-      return res.status(401).json({ 
-        error: 'Authentication failed',
-        message: 'Check your Twitter API credentials'
-      });
-    }
-    
-    res.status(500).json({ 
-      error: error.message || 'Failed to fetch tweets',
-      code: error.code
-    });
-  }
-});
-
-// Поиск по твитам
-app.get('/api/search', async (req, res) => {
-  try {
-    const query = req.query.q;
-    const limit = parseInt(req.query.limit) || 10;
-    
-    if (!query) {
-      return res.status(400).json({ error: 'Query parameter "q" is required' });
-    }
-    
-    console.log(`🔍 Searching for: ${query}`);
-    
-    const searchResults = await readOnlyClient.v2.search(query, {
-      max_results: Math.min(limit, 100),
-      'tweet.fields': ['created_at', 'public_metrics', 'author_id'],
-      expansions: ['author_id']
-    });
-    
-    const tweets = searchResults.data.data.map(tweet => ({
-      id: tweet.id,
-      text: tweet.text,
-      created_at: tweet.created_at,
-      likes: tweet.public_metrics.like_count,
-      retweets: tweet.public_metrics.retweet_count,
-      url: `https://twitter.com/i/status/${tweet.id}`
-    }));
-    
-    res.json({
-      success: true,
-      query: query,
-      tweets: tweets,
-      count: tweets.length
-    });
-    
-  } catch (error) {
-    console.error('❌ Search Error:', error);
-    res.status(500).json({ 
-      error: error.message || 'Search failed'
-    });
-  }
-});
-
-// Получить один твит по ID
-app.get('/api/tweet/:id', async (req, res) => {
-  try {
-    const tweetId = req.params.id;
-    
-    const tweet = await readOnlyClient.v2.singleTweet(tweetId, {
-      'tweet.fields': ['created_at', 'public_metrics', 'entities'],
-      expansions: ['author_id'],
-      'user.fields': ['username', 'name', 'profile_image_url']
-    });
-    
-    res.json({
-      success: true,
-      tweet: {
-        id: tweet.data.id,
-        text: tweet.data.text,
-        created_at: tweet.data.created_at,
-        metrics: tweet.data.public_metrics,
-        author: tweet.includes.users[0]
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ Error:', error);
-    res.status(500).json({ 
-      error: error.message || 'Failed to fetch tweet'
-    });
-  }
+  });
 });
 
 // Health check
-app.get('/health', (req, res) => {
-  const hasCredentials = 
-    process.env.TWITTER_API_KEY && 
-    process.env.TWITTER_API_SECRET &&
-    process.env.TWITTER_ACCESS_TOKEN &&
-    process.env.TWITTER_ACCESS_SECRET;
-  
-  res.json({ 
-    status: 'OK',
-    method: 'Twitter API v2',
-    authenticated: hasCredentials,
-    warning: hasCredentials ? null : 'Missing API credentials'
-  });
-});
-
-// Root endpoint
 app.get('/', (req, res) => {
   res.json({ 
-    status: 'Running',
-    method: 'Twitter API v2',
-    endpoints: {
-      userTweets: '/api/tweets/:username',
-      search: '/api/search?q=query',
-      singleTweet: '/api/tweet/:id',
-      health: '/health'
-    },
-    examples: {
-      userTweets: '/api/tweets/elonmusk?limit=10',
-      search: '/api/search?q=javascript&limit=20',
-      singleTweet: '/api/tweet/1234567890'
-    },
-    requirements: 'Twitter Developer Account with API keys'
+    status: 'ok', 
+    message: 'Twitter Monitor API',
+    tempDir: TEMP_DIR,
+    scriptPath: SCRIPT_PATH,
+    pythonCmd: PYTHON_CMD,
+    platform: process.platform
   });
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`🚀 Twitter API v2 Server running on port ${port}`);
-  console.log(`📡 Visit http://localhost:${port} for API info`);
-});
+// Запуск сервера
+(async () => {
+  await initScript();
+  
+  app.listen(PORT, async () => {
+    console.log(`🚀 Twikit Server on port ${PORT}`);
+    const isAuth = await checkAuth();
+    console.log(`🔐 Authenticated: ${isAuth}`);
+  });
+})();
