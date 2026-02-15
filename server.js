@@ -10,18 +10,45 @@ app.use(express.json());
 const client = new TwitterApi({
   appKey: process.env.TWITTER_API_KEY,
   appSecret: process.env.TWITTER_API_SECRET,
-  accessToken: process.env.TWITTER_ACCESS_TOKEN,  // Опционально, если нужно
-  accessSecret: process.env.TWITTER_ACCESS_SECRET  // Опционально
+  accessToken: process.env.TWITTER_ACCESS_TOKEN,
+  accessSecret: process.env.TWITTER_ACCESS_SECRET
 });
 
+// ✅ ИСПРАВЛЕНО: используем path parameter /:username
 app.get('/api/tweets/:username', async (req, res) => {
   try {
     const username = req.params.username;
-    const tweets = await client.v2.userTweets(username, { 'tweet.fields': 'created_at,public_metrics' });
-    res.json(await tweets);
+    
+    // ✅ ШАГ 1: Получаем USER ID по username
+    const user = await client.v2.userByUsername(username);
+    
+    if (!user.data) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // ✅ ШАГ 2: Получаем твиты по USER ID
+    const tweets = await client.v2.userTimeline(user.data.id, {
+      'tweet.fields': 'created_at,public_metrics',
+      'max_results': 10  // опционально: количество твитов
+    });
+    
+    res.json({
+      user: user.data,
+      tweets: tweets.data.data || []
+    });
+    
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Twitter API Error:', error);
+    res.status(500).json({ 
+      error: error.message,
+      code: error.code || 'UNKNOWN'
+    });
   }
+});
+
+// ✅ Тестовый эндпоинт (чтобы проверить что сервер работает)
+app.get('/', (req, res) => {
+  res.json({ status: 'Server is running!' });
 });
 
 const port = process.env.PORT || 3000;
