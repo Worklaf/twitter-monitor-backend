@@ -14,7 +14,7 @@ const client = new TwitterApi({
   accessSecret: process.env.TWITTER_ACCESS_SECRET  // Опционально
 });
 
-app.get('/tweets/:username', async (req, res) => {
+app.get('/api/tweets/:username', async (req, res) => {
   try {
     const username = req.params.username;
     const tweets = await client.v2.userTweets(username, { 'tweet.fields': 'created_at,public_metrics' });
